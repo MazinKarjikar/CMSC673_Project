@@ -12,7 +12,36 @@ client = OpenAI(
     base_url=openai_api_base,
 )
 
-# Replace the main block with a simpler version that can be ignored when imported
+models = client.models.list()
+model = models.data[0].id
+
+def get_response(prompt, max_depth=3, max_width=3, verbose=False):
+    """
+    Process a prompt and return the final solution.
+
+    Args:
+        prompt (str): The user's question or prompt
+        max_depth (int, optional): Maximum recursion depth for problem decomposition. Defaults to 3.
+        max_width (int, optional): Maximum number of subproblems at each level. Defaults to 3.
+        verbose (bool, optional): If True, prints detailed progress and returns detailed results. Defaults to False.
+
+    Returns:
+        str: The final solution to the prompt
+        dict: The full result object if verbose=True, otherwise None
+    """
+    try:
+        result = process_prompt()
+        if verbose:
+            print("\n=== DETAILED RESULTS ===")
+            print_results(result)
+            return result['solution'], result
+        return result['solution']
+    except Exception as e:
+        if verbose:
+            print(f"Error processing prompt: {e}")
+        error_message = f"An error occurred while processing your request: {str(e)}"
+        return error_message
+
 if __name__ == "__main__":
     while True:
         try:
