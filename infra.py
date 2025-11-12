@@ -15,12 +15,125 @@ client = OpenAI(
 models = client.models.list()
 model = models.data[0].id
 
+def parse_json_response(text):
+    """
+    Cleans up a text string to extract a JSON object.
+    Removes markdown code fences and extracts the JSON substring.
+    Raises a JSONDecodeError if parsing fails.
+    """
+    # Remove markdown formatting
+    text = re.sub(r"```(?:json)?", "", text)
+    text = re.sub(r"```", "", text)
+    # Extract JSON substring if extra text exists
+    json_match = re.search(r'(\{.*\})', text, re.DOTALL)
+    json_text = json_match.group(1) if json_match else text.strip()
+    return json.loads(json_text)
+
+def solve_atomic_problem(client, model, problem, original_prompt, verbose=False):
+    messages = [
+        {"role": "user", "content": f"""This is a specific problem related to the original question: "{original_prompt}"
+
+Solve this problem directly: {problem}
+
+⚠️ CRITICAL FORMAT REQUIREMENTS - VIOLATION WILL CAUSE SYSTEM FAILURE ⚠️
+YOUR ENTIRE RESPONSE MUST BE A SINGLE JSON OBJECT - NOTHING ELSE
+REQUIRED FORMAT: {{"solution": "your answer"}}
+
+❌ DO NOT ADD:
+- No explanation text
+- No markdown formatting
+- No code blocks
+- No backticks
+- No additional keys
+- No comments
+- No introduction
+- No "Here's the solution:"
+- No "The answer is:"
+
+✅ CORRECT EXAMPLES:
+{{"solution": "The square root of 16 is 4"}}
+{{"solution": "To solve this, multiply 5 by 3 to get 15"}}
+
+❌ INCORRECT EXAMPLES:
+Here's the solution: {{"solution": "answer"}}"""}
+    ]
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.6
+        )
+        content = response.choices[0].message.content
+        if content is None:
+            print("Warning: Received None content from the model in solve_atomic_problem")
+            return "Unable to get a response for this problem."
+        try:
+            result = parse_json_response(content)
+            return result.get("solution", content)
+        except json.JSONDecodeError:
+            print("Warning: Failed to parse JSON from model response in solve_atomic_problem")
+            print("Raw response:", content)
+            return f"JSON parse error. Raw response: {content}"
+    except Exception as e:
+        print("Error in solve_atomic_problem:", e)
+        if 'response' in locals() and hasattr(response, 'choices') and response.choices:
+            print("Raw model output:", response.choices[0].message.content)
+        return f"Error solving atomic problem. Error: {e}"
+
+def should_decompose(client, model, problem, depth, max_depth, verbose=False):
+    if depth >= max_depth:
+        return False
+
+    messages = [
+        {"role": "user", "content": f"""Consider this problem: {problem}
+
+Should this problem be broken down into smaller subproblems? Use these strict criteria:
+1. The problem MUST involve multiple INDEPENDENT steps or components that can be solved separately
+2. Each subproblem should be clearly distinct with NO OVERLAP in what they're asking
+3. The combined solutions must be sufficient to answer the original problem
+4. If the problem is focused and specific enough to answer in one step, it is atomic
+
+IMPORTANT - YOU MUST FOLLOW THESE FORMAT RULES:
+1. Your entire response MUST be a valid JSON object
+2. The JSON MUST contain EXACTLY ONE key named "decision"
+3. The "decision" value MUST be EXACTLY either "DECOMPOSE" or "ATOMIC"
+4. NO markdown, NO code blocks, NO backticks, NO additional text
+5. ANY deviation from this format will cause errors
+
+Required JSON structure:
+{{"decision": "DECOMPOSE"}} or {{"decision": "ATOMIC"}}
+
+Bad response example: ```{{"decision": "DECOMPOSE"}}```
+Bad response example: I think we should decompose: {{"decision": "DECOMPOSE"}}
+Good response example: {{"decision": "DECOMPOSE"}}"""}
+    ]
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.6
+        )
+        content = response.choices[0].message.content
+        if content is None:
+            print("Warning: Received None content from the model in should_decompose")
+            return False
+        try:
+            result = parse_json_response(content)
+            decision = result.get("decision", "").strip().upper()
+            return decision == "DECOMPOSE"
+        except json.JSONDecodeError:
+            print("JSON parse error in should_decompose. Raw response:", content)
+            return "DECOMPOSE" in content.strip().upper()
+    except Exception as e:
+        print("Error in should_decompose:", e)
+        return False
+
 def solve_problem(client, model, problem, original_prompt, depth=0, max_depth=5, max_width=3, verbose=False):
     if verbose:
         print(f"Processing problem at depth {depth}: {problem if len(problem) < 100 else problem[:100] + '...'}")
 
-    if depth >= max_depth or not should_decompose():
-        solution = solve_atomic_problem()
+    if depth >= max_depth or not should_decompose(client, model, problem, depth, max_depth):
+        solution = solve_atomic_problem(client, model, problem, original_prompt, verbose)
         return {
             'solution': solution,
             'atomic': True,
@@ -31,9 +144,9 @@ def solve_problem(client, model, problem, original_prompt, depth=0, max_depth=5,
             'sub_results': []
         }
 
-    subproblems = break_down_problem()
+    subproblems = break_down_problem(client, model, problem, original_prompt, depth, max_width, verbose)
     if not subproblems:
-        solution = solve_atomic_problem()
+        solution = solve_atomic_problem(client, model, problem, original_prompt, verbose)
         return {
             'solution': solution,
             'atomic': True,
@@ -87,7 +200,7 @@ def solve_problem(client, model, problem, original_prompt, depth=0, max_depth=5,
     sub_solutions = [result['solution'] for result in sub_results]
     if verbose:
         print(f"Combining {len(sub_solutions)} solutions at depth {depth}")
-    combined_solution = combine_solutions()
+    combined_solution = combine_solutions(client, model, problem, subproblems, sub_solutions, original_prompt, verbose)
     return {
         'solution': combined_solution,
         'atomic': False,
