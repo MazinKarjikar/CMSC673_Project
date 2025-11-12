@@ -128,6 +128,120 @@ Good response example: {{"decision": "DECOMPOSE"}}"""}
         print("Error in should_decompose:", e)
         return False
 
+def break_down_problem(client, model, problem, original_prompt, depth=0, max_width=3, verbose=False):
+    messages = [
+        {"role": "user", "content": f"""Break down this problem into independent subproblems:
+
+Problem: {problem}
+Original question: {original_prompt}
+
+Requirements for the subproblems:
+1. Each subproblem MUST be completely independent and solvable on its own
+2. There MUST be NO OVERLAP between subproblems
+3. The subproblems must be specific and focused
+4. When combined, the solutions MUST fully answer the original problem
+5. Choose 1-{max_width} subproblems maximum, based on what's truly necessary
+
+IMPORTANT - YOU MUST FOLLOW THESE FORMAT RULES:
+1. Your entire response MUST be a valid JSON object
+2. The JSON MUST contain EXACTLY ONE key named "subproblems"
+3. The value MUST be an array of strings with AT MOST {max_width} items
+4. NO markdown, NO code blocks, NO backticks, NO additional text
+5. ANY deviation from this format will cause errors
+
+Required JSON structure:
+{{"subproblems": ["First independent subproblem", "Second independent subproblem"]}}"""}
+    ]
+
+    try:
+        breakdown = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.6
+        )
+        breakdown_text = breakdown.choices[0].message.content
+        if breakdown_text is None:
+            print("Warning: Received None content from the model in break_down_problem")
+            return [f"Solve the problem directly: {problem}"]
+        try:
+            result = parse_json_response(breakdown_text)
+            subproblems = result.get("subproblems", [])
+            subproblems = [s for s in subproblems if s and isinstance(s, str)]
+            # Enforce max_width limit
+            subproblems = subproblems[:max_width]
+            if subproblems:
+                print(f"Extracted {len(subproblems)} subproblems at depth {depth}.")
+                return subproblems
+        except json.JSONDecodeError:
+            print("Warning: Failed to parse JSON in break_down_problem, falling back to text parsing")
+            print("Raw response:", breakdown_text)
+            subproblems = []
+            lines = breakdown_text.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                match = re.match(r'^(\d+\.\s*|\*\s*|\-\s*)(.*)', line)
+                if match and match.group(2).strip():
+                    subproblems.append(match.group(2).strip())
+            if not subproblems and ',' in breakdown_text:
+                subproblems = [s.strip() for s in breakdown_text.split(',')]
+            # Enforce max_width limit
+            subproblems = subproblems[:max_width]
+            return subproblems if subproblems else [f"Solve the problem directly: {problem}"]
+    except Exception as e:
+        print("Error in break_down_problem:", e)
+        return [f"Solve the problem directly: {problem}"]
+
+def combine_solutions(client, model, original_problem, subproblems, sub_solutions, original_prompt, verbose=False):
+    # Filter out failed solutions
+    valid_pairs = [(subproblem, solution) for subproblem, solution in zip(subproblems, sub_solutions)
+                  if isinstance(solution, str) and not solution.startswith("Error") and not solution.startswith("JSON parse error")]
+
+    if not valid_pairs:
+        return solve_atomic_problem(client, model, original_problem, original_prompt, verbose)
+
+    subproblem_solutions = ""
+    for i, (subproblem, solution) in enumerate(valid_pairs):
+        subproblem_solutions += f"Subproblem {i+1}: \"{subproblem}\"\n"
+        subproblem_solutions += f"Solution {i+1}: {solution}\n\n"
+
+    messages = [
+        {"role": "user", "content": f"""I've broken a complex problem into subproblems and solved each one.
+
+Original question: {original_prompt}
+Current problem to solve: {original_problem}
+
+{subproblem_solutions}
+
+Using ALL of these solutions, provide a complete but concise answer to the current problem.
+Be direct and include only what's necessary.
+
+IMPORTANT: Your response MUST be ONLY valid JSON format with a single key "combined_solution" containing your answer.
+Do NOT include markdown code blocks, backticks, or any other formatting.
+Example of correct response: {{"combined_solution": "Your complete answer here"}}"""}
+    ]
+    try:
+        final_response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.6
+        )
+        content = final_response.choices[0].message.content
+        if content is None:
+            return "Unable to combine solutions due to model error."
+        try:
+            result = parse_json_response(content)
+            return result.get("combined_solution", content)
+        except json.JSONDecodeError:
+            # Fallback extraction using regex if JSON parsing fails.
+            print("Warning: Failed to parse JSON in combine_solutions. Raw response:", content)
+            combined_match = re.search(r'"combined_solution":\s*"(.*?)"', content)
+            if combined_match:
+                return combined_match.group(1)
+            return content.strip()
+    except Exception as e:
+        print("Error in combine_solutions:", str(e))
+        return f"Error combining solutions: {str(e)}"
+
 def solve_problem(client, model, problem, original_prompt, depth=0, max_depth=5, max_width=3, verbose=False):
     if verbose:
         print(f"Processing problem at depth {depth}: {problem if len(problem) < 100 else problem[:100] + '...'}")
