@@ -355,6 +355,30 @@ def get_response(prompt, max_depth=3, max_width=3, verbose=False):
         error_message = f"An error occurred while processing your request: {str(e)}"
         return error_message
 
+def print_results(result, indent=0):
+    indent_str = "  " * indent
+
+    def safe_truncate(s, length=100):
+        s = str(s) if not isinstance(s, str) else s
+        return (s[:length] + '...') if len(s) > length else s
+
+    if result.get('atomic', False):
+        print(f"{indent_str}[ATOMIC] {safe_truncate(result.get('original_problem', 'Problem'))}")
+        print(f"{indent_str}Solution: {safe_truncate(result['solution'])}")
+    else:
+        print(f"{indent_str}Problem: {safe_truncate(result.get('original_problem', 'Root problem'))}")
+        print(f"{indent_str}Final solution: {safe_truncate(result['solution'])}")
+        if result.get('sub_results'):
+            # Count successful vs failed subproblems
+            successful = sum(1 for r in result['sub_results'] if not r['solution'].startswith("Error"))
+            total = len(result['sub_results'])
+
+            print(f"{indent_str}Subproblems ({successful}/{total} successful):")
+            for i, sub_result in enumerate(result['sub_results']):
+                status = "[OK]" if not sub_result['solution'].startswith("Error") else "[FAILED]"
+                print(f"{indent_str}  #{i+1} {status}:")
+                print_results(sub_result, indent + 2)
+
 if __name__ == "__main__":
     while True:
         try:
@@ -362,6 +386,17 @@ if __name__ == "__main__":
             if user_input.lower() in ['quit', 'exit', 'q']:
                 print("Goodbye!")
                 break
+
+            verbose_mode = True  # Set to False to disable verbose mode
+            if verbose_mode:
+                response, result_data = get_response(user_input, verbose=True)
+                print("\n=== DETAILED RESULTS ===")
+                print_results(result_data)
+            else:
+                response = get_response(user_input, verbose=False)
+
+            print("\n=== FINAL RESPONSE ===")
+            print(response)
 
         except KeyboardInterrupt:
             print("\nGoodbye!")
