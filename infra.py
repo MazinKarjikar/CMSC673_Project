@@ -19,6 +19,7 @@ def parse_json_response(text):
     """
     Cleans up a text string to extract a JSON object.
     Removes markdown code fences and extracts the JSON substring.
+    Handles multi-line strings by converting them to escaped newlines.
     Raises a JSONDecodeError if parsing fails.
     """
     # Remove markdown formatting
@@ -27,35 +28,72 @@ def parse_json_response(text):
     # Extract JSON substring if extra text exists
     json_match = re.search(r'(\{.*\})', text, re.DOTALL)
     json_text = json_match.group(1) if json_match else text.strip()
-    return json.loads(json_text)
+    
+    # Try parsing as-is first
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Fix multi-line strings: find content between quotes and escape newlines
+    # This handles cases where the model puts actual newlines inside JSON string values
+    def fix_multiline_strings(match):
+        content = match.group(1)
+        # Escape actual newlines within the string
+        content = content.replace('\n', '\\n').replace('\r', '\\r')
+        # Also escape any unescaped quotes
+        content = re.sub(r'(?<!\\)"', '\\"', content)
+        return f'"{content}"'
+    
+    # Match string values (content between quotes, handling the key-value pattern)
+    # This regex finds ": " followed by a quoted string value
+    fixed_text = re.sub(
+        r'"([^"]*(?:\\"[^"]*)*)"',
+        lambda m: '"' + m.group(1).replace('\n', '\\n').replace('\r', '\\r') + '"',
+        json_text
+    )
+    
+    try:
+        return json.loads(fixed_text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Last resort: extract the value directly using regex
+    # Look for "solution": "..." or "combined_solution": "..." etc.
+    for key in ['solution', 'combined_solution', 'decision', 'subproblems']:
+        pattern = rf'"{key}"\s*:\s*"(.*?)"(?:\s*[,}}])'
+        match = re.search(pattern, json_text, re.DOTALL)
+        if match:
+            value = match.group(1).replace('\\"', '"')
+            if key == 'subproblems':
+                # Handle array case
+                array_match = re.search(rf'"{key}"\s*:\s*\[(.*?)\]', json_text, re.DOTALL)
+                if array_match:
+                    items = re.findall(r'"([^"]*)"', array_match.group(1))
+                    return {key: items}
+            return {key: value}
+    
+    # If all else fails, raise the original error
+    raise json.JSONDecodeError("Could not parse JSON", json_text, 0)
 
 def solve_atomic_problem(client, model, problem, original_prompt, verbose=False):
     messages = [
-        {"role": "user", "content": f"""This is a specific problem related to the original question: "{original_prompt}"
+        {"role": "user", "content": f"""Solve ONLY this specific task: {problem}
 
-Solve this problem directly: {problem}
+Context (for reference only): This relates to the broader question "{original_prompt}"
 
-⚠️ CRITICAL FORMAT REQUIREMENTS - VIOLATION WILL CAUSE SYSTEM FAILURE ⚠️
-YOUR ENTIRE RESPONSE MUST BE A SINGLE JSON OBJECT - NOTHING ELSE
-REQUIRED FORMAT: {{"solution": "your answer"}}
+⚠️ CRITICAL RULES:
+1. Answer ONLY the specific task above - nothing else
+2. Do NOT answer other parts of the original question
+3. Stay focused on this ONE task
+4. If the task is about math, give ONLY the math answer
+5. If the task is about ethics, discuss ONLY ethics
+6. Do NOT combine topics
 
-❌ DO NOT ADD:
-- No explanation text
-- No markdown formatting
-- No code blocks
-- No backticks
-- No additional keys
-- No comments
-- No introduction
-- No "Here's the solution:"
-- No "The answer is:"
+RESPONSE FORMAT - Return ONLY valid JSON (no newlines inside the string value):
+{{"solution": "Your focused answer to the specific task only"}}
 
-✅ CORRECT EXAMPLES:
-{{"solution": "The square root of 16 is 4"}}
-{{"solution": "To solve this, multiply 5 by 3 to get 15"}}
-
-❌ INCORRECT EXAMPLES:
-Here's the solution: {{"solution": "answer"}}"""}
+Keep your answer on a single line or use \\n for line breaks within the JSON string."""}
     ]
     try:
         response = client.chat.completions.create(
@@ -85,27 +123,36 @@ def should_decompose(client, model, problem, depth, max_depth, verbose=False):
         return False
 
     messages = [
-        {"role": "user", "content": f"""Consider this problem: {problem}
+        {"role": "user", "content": f"""Analyze whether this problem requires decomposition: {problem}
 
-Should this problem be broken down into smaller subproblems? Use these strict criteria:
-1. The problem MUST involve multiple INDEPENDENT steps or components that can be solved separately
-2. Each subproblem should be clearly distinct with NO OVERLAP in what they're asking
-3. The combined solutions must be sufficient to answer the original problem
-4. If the problem is focused and specific enough to answer in one step, it is atomic
+DECOMPOSE only if ALL of these conditions are met:
+1. The problem EXPLICITLY asks for 2+ UNRELATED things (often connected by "AND", "also", or comma)
+2. Each part requires COMPLETELY DIFFERENT expertise (e.g., calculus vs philosophy)
+3. You could give each part to a different specialist with zero overlap
+4. The problem cannot be answered coherently as one response
 
-IMPORTANT - YOU MUST FOLLOW THESE FORMAT RULES:
-1. Your entire response MUST be a valid JSON object
-2. The JSON MUST contain EXACTLY ONE key named "decision"
-3. The "decision" value MUST be EXACTLY either "DECOMPOSE" or "ATOMIC"
-4. NO markdown, NO code blocks, NO backticks, NO additional text
-5. ANY deviation from this format will cause errors
+KEEP ATOMIC (do NOT decompose) if ANY of these apply:
+- The problem is about ONE topic, even if complex
+- It asks for steps/process (these are sequential, not independent)
+- It asks about one domain (ethics, math, science, etc.)
+- Subproblems would share ANY vocabulary or concepts
+- It's already a focused subproblem from a larger question
+- The answer would be a single coherent paragraph or list
 
-Required JSON structure:
-{{"decision": "DECOMPOSE"}} or {{"decision": "ATOMIC"}}
+ATOMIC EXAMPLES (never decompose these patterns):
+- "What should I do if X?" → ATOMIC (single scenario)
+- "Explain/Describe X" → ATOMIC (single topic)
+- "What are the ethical considerations of X?" → ATOMIC (single analysis)
+- "Discuss biases in X" → ATOMIC (single topic)
+- "Find the derivative of X" → ATOMIC (single calculation)
+- "What are pros and cons of X?" → ATOMIC (single analysis)
 
-Bad response example: ```{{"decision": "DECOMPOSE"}}```
-Bad response example: I think we should decompose: {{"decision": "DECOMPOSE"}}
-Good response example: {{"decision": "DECOMPOSE"}}"""}
+DECOMPOSE EXAMPLES (must have explicit AND connecting unrelated topics):
+- "Find derivative of f(x)=3x² AND discuss AI ethics in medicine" → DECOMPOSE (math AND ethics)
+- "Write a haiku AND solve 2+2" → DECOMPOSE (creative AND math)
+
+Respond with ONLY valid JSON:
+{{"decision": "DECOMPOSE"}} or {{"decision": "ATOMIC"}}"""}
     ]
     try:
         response = client.chat.completions.create(
@@ -130,27 +177,30 @@ Good response example: {{"decision": "DECOMPOSE"}}"""}
 
 def break_down_problem(client, model, problem, original_prompt, depth=0, max_width=3, verbose=False):
     messages = [
-        {"role": "user", "content": f"""Break down this problem into independent subproblems:
+        {"role": "user", "content": f"""Extract the EXPLICITLY SEPARATE parts of this problem:
 
 Problem: {problem}
 Original question: {original_prompt}
 
-Requirements for the subproblems:
-1. Each subproblem MUST be completely independent and solvable on its own
-2. There MUST be NO OVERLAP between subproblems
-3. The subproblems must be specific and focused
-4. When combined, the solutions MUST fully answer the original problem
-5. Choose 1-{max_width} subproblems maximum, based on what's truly necessary
+RULES:
+1. ONLY decompose if the problem contains EXPLICIT separate requests (connected by AND, comma, etc.)
+2. Each subproblem must be a DIRECT QUOTE or close paraphrase from the original
+3. Do NOT invent new subproblems or expand the scope
+4. Do NOT break a single topic into aspects/perspectives/steps
 
-IMPORTANT - YOU MUST FOLLOW THESE FORMAT RULES:
-1. Your entire response MUST be a valid JSON object
-2. The JSON MUST contain EXACTLY ONE key named "subproblems"
-3. The value MUST be an array of strings with AT MOST {max_width} items
-4. NO markdown, NO code blocks, NO backticks, NO additional text
-5. ANY deviation from this format will cause errors
+VALID decomposition (explicit AND connecting unrelated topics):
+- "Calculate 2+2 AND write a poem" → ["Calculate 2+2", "Write a poem"]
+- "Explain photosynthesis AND discuss economic policy" → ["Explain photosynthesis", "Discuss economic policy"]
 
-Required JSON structure:
-{{"subproblems": ["First independent subproblem", "Second independent subproblem"]}}"""}
+INVALID decomposition (single topic, no explicit AND):
+- "Discuss AI ethics" → [] (single topic - don't split into "biases", "fairness", etc.)
+- "What should I do after a crash?" → [] (single scenario - don't split into steps)
+- "Explain quantum computing" → [] (single topic - don't split into aspects)
+
+If there are NOT 2+ explicitly separate requests, return EMPTY: {{"subproblems": []}}
+
+Return ONLY valid JSON on a single line:
+{{"subproblems": ["exact part 1 from problem", "exact part 2 from problem"]}}"""}
     ]
 
     try:
@@ -205,19 +255,29 @@ def combine_solutions(client, model, original_problem, subproblems, sub_solution
         subproblem_solutions += f"Solution {i+1}: {solution}\n\n"
 
     messages = [
-        {"role": "user", "content": f"""I've broken a complex problem into subproblems and solved each one.
+        {"role": "user", "content": f"""Synthesize these partial solutions into ONE coherent answer.
 
 Original question: {original_prompt}
-Current problem to solve: {original_problem}
+Current problem: {original_problem}
 
+Partial solutions:
 {subproblem_solutions}
 
-Using ALL of these solutions, provide a complete but concise answer to the current problem.
-Be direct and include only what's necessary.
+SYNTHESIS RULES:
+1. REMOVE REDUNDANCY: If multiple solutions mention the same advice, include it only ONCE
+2. UNIFY: Create a single flowing answer, not a list of separate solutions pasted together
+3. PRIORITIZE: Put the most important/urgent information first
+4. BE CONCISE: Every sentence should add new information
+5. NATURAL LANGUAGE: Write as if you're directly answering the original question
 
-IMPORTANT: Your response MUST be ONLY valid JSON format with a single key "combined_solution" containing your answer.
-Do NOT include markdown code blocks, backticks, or any other formatting.
-Example of correct response: {{"combined_solution": "Your complete answer here"}}"""}
+BAD synthesis (redundant):
+"Check for injuries. Also check if anyone is hurt. Make sure to look for injuries."
+
+GOOD synthesis (unified):
+"First, check yourself and others for injuries."
+
+Return ONLY valid JSON:
+{{"combined_solution": "Your synthesized answer here"}}"""}
     ]
     try:
         final_response = client.chat.completions.create(
