@@ -1,0 +1,32 @@
+# GRPO Training Requirements
+
+# Core
+torch>=2.1.0
+transformers>=4.40.0
+
+# TRL for GRPO
+trl>=0.8.0
+
+# LoRA
+peft>=0.10.0
+
+# Quantization  
+bitsandbytes>=0.43.0
+accelerate>=0.28.0
+
+# Dataset
+datasets>=2.18.0
+
+# Rewards
+sentence-transformers>=2.6.0
+scikit-learn>=1.4.0
+
+# vLLM inference (TRL requires 0.10.2-0.11.2)
+vllm==0.11.2
+openai>=1.0.0
+
+# Logging
+wandb>=0.16.0
+
+# Utils
+numpy>=1.26.0
