@@ -172,5 +172,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-message.txt
-6 KB
